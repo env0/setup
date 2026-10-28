@@ -29,12 +29,13 @@ output "cur_prefix" {
 }
 
 output "deploy_role_arns" {
-  description = "ARN of the deploy role per member account ID."
+  description = "ARN of the deploy role per member account ID, for the accounts whose stack instance is CURRENT."
+  # From the instances, not the list: a failed account's instance stays OUTDATED and its role may not exist.
   value = {
-    for id in(local.deploy_roles ? var.deploy_account_ids : []) :
-    id => "arn:${data.aws_partition.current.partition}:iam::${id}:role/${var.deploy_role_name}"
+    for summary in flatten(aws_cloudformation_stack_instances.deploy_roles[*].stack_instance_summaries) :
+    summary.account_id => "arn:${data.aws_partition.current.partition}:iam::${summary.account_id}:role/${var.deploy_role_name}"
+    if summary.status == "CURRENT" && contains(var.deploy_account_ids, summary.account_id)
   }
-  depends_on = [aws_cloudformation_stack_instances.deploy_roles]
 
   precondition {
     condition     = local.organization || length(var.deploy_account_ids) == 0

@@ -1,14 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  env zero, member account. Creates the role that env zero deploys with, trusted by env zero's OpenID Connect issuer
-  or by env zero's AWS account with the env zero organization ID as External ID.
+  env zero, member account. Creates the role that env zero deploys with, trusted by env zero's OpenID Connect tokens of
+  the picked projects, or by the organization's self-hosted agent role with the env zero organization ID as External ID.
 
 Parameters:
   RoleName:
     Type: String
     Description: Name of the deploy role, the same in every member account.
     AllowedPattern: '^[\w+=,.@-]{1,64}$'
-    Default: env-zero-deploy
+    Default: env0-deploy
   SignInMethod:
     Type: String
     Description: How env zero signs in, as its deployment credential does.
@@ -16,13 +16,24 @@ Parameters:
       - oidc
       - assume_role
     Default: oidc
+  # AWS managed policies only: a customer managed policy's ARN names one account, and each member account has its own.
+  ManagedPolicyArns:
+    Type: CommaDelimitedList
+    Description: AWS managed policies the deploy role gets. The module sends AdministratorAccess unless told otherwise.
+    AllowedPattern: '^arn:aws[a-z-]*:iam::aws:policy/[^,]+$'
+    Default: arn:aws:iam::aws:policy/AdministratorAccess
+  PermissionsBoundaryPolicyName:
+    Type: String
+    Description: Path and name of the deploy role's permissions boundary, a policy each member account must have. Empty for none.
+    AllowedPattern: '^([\w+=,.@-]+/)*[\w+=,.@-]*$'
+    Default: ''
   MaxSessionDuration:
     Type: Number
     Description: Longest session env zero can ask for, in seconds. env zero asks for 18000 unless the credential sets its own duration.
     Default: 18000
     MinValue: 3600
     MaxValue: 43200
-  # No quote or backslash in the next four: the trust policy is JSON that Fn::Sub builds from them.
+  # No quote or backslash in the trust inputs below: the trust policy is JSON that Fn::Sub builds from them.
   OidcIssuer:
     Type: String
     Description: env zero's OpenID Connect issuer without the scheme, with its trailing slash. OIDC only.
@@ -38,14 +49,18 @@ Parameters:
     Description: Subject of the env zero organization's tokens. OIDC only.
     AllowedPattern: '^[^"\\]*$'
     Default: ''
-  Env0AccountId:
+  AllowedProjectIds:
+    Type: CommaDelimitedList
+    Description: env zero projects whose deployments may sign in, by the projectId session tag of their tokens. OIDC only.
+    AllowedPattern: '^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$'
+    Default: ''
+  TrustedPrincipalArn:
     Type: String
-    Description: env zero's AWS account. Assume role only.
-    AllowedPattern: '^\d{12}$'
-    Default: '913128560467'
+    Description: The IAM role of the organization's self-hosted env zero agent. Assume role only.
+    AllowedPattern: '^(arn:aws[a-z-]*:iam::\d{12}:role/[\w+=,.@/-]+)?$'
   Env0OrganizationId:
     Type: String
-    Description: The env zero organization ID, which env zero sends as External ID. Assume role only.
+    Description: The env zero organization ID, which the agent sends as External ID. Assume role only.
     AllowedPattern: '^[^"\\]*$'
     Default: ''
 
@@ -55,14 +70,19 @@ Rules:
     Assertions:
       - Assert: {'Fn::Not': [{'Fn::Equals': [{Ref: OidcSubject}, '']}]}
         AssertDescription: OIDC needs OidcSubject.
+      - Assert: {'Fn::Not': [{'Fn::EachMemberEquals': [{Ref: AllowedProjectIds}, '']}]}
+        AssertDescription: OIDC needs AllowedProjectIds.
   AssumeRoleInputs:
     RuleCondition: {'Fn::Equals': [{Ref: SignInMethod}, assume_role]}
     Assertions:
       - Assert: {'Fn::Not': [{'Fn::Equals': [{Ref: Env0OrganizationId}, '']}]}
         AssertDescription: Assume role needs Env0OrganizationId.
+      - Assert: {'Fn::Not': [{'Fn::Equals': [{Ref: TrustedPrincipalArn}, '']}]}
+        AssertDescription: Assume role needs TrustedPrincipalArn.
 
 Conditions:
   UseOidc: {'Fn::Equals': [{Ref: SignInMethod}, oidc]}
+  HasPermissionsBoundary: {'Fn::Not': [{'Fn::Equals': [{Ref: PermissionsBoundaryPolicyName}, '']}]}
 
 Resources:
   DeployRole:
@@ -71,6 +91,8 @@ Resources:
       RoleName: {Ref: RoleName}
       MaxSessionDuration: {Ref: MaxSessionDuration}
       # A JSON string, because the OIDC condition keys hold the issuer and CloudFormation allows no intrinsic in a key.
+      # sts:TagSession, because env zero tokens carry session tags and STS refuses them without it. The projectId tag
+      # is env zero's own claim, so only deployments of the picked projects sign in.
       AssumeRolePolicyDocument:
         'Fn::If':
           - UseOidc
@@ -79,16 +101,22 @@ Resources:
               - >-
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                 "Principal":{"Federated":"${ProviderArn}"},
-                "Action":"sts:AssumeRoleWithWebIdentity",
-                "Condition":{"StringEquals":{"${OidcIssuer}:aud":"${OidcAudience}","${OidcIssuer}:sub":"${OidcSubject}"}}}]}
+                "Action":["sts:AssumeRoleWithWebIdentity","sts:TagSession"],
+                "Condition":{"StringEquals":{"${OidcIssuer}:aud":"${OidcAudience}","${OidcIssuer}:sub":"${OidcSubject}",
+                "aws:RequestTag/projectId":["${ProjectIds}"]}}}]}
               - ProviderArn: {'Fn::GetAtt': [OidcProvider, Arn]}
+                ProjectIds: {'Fn::Join': ['","', {Ref: AllowedProjectIds}]}
           - 'Fn::Sub': >-
               {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-              "Principal":{"AWS":"arn:${AWS::Partition}:iam::${Env0AccountId}:root"},
+              "Principal":{"AWS":"${TrustedPrincipalArn}"},
               "Action":"sts:AssumeRole",
               "Condition":{"StringEquals":{"sts:ExternalId":"${Env0OrganizationId}"}}}]}
-      ManagedPolicyArns:
-        - {'Fn::Sub': 'arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess'}
+      ManagedPolicyArns: {Ref: ManagedPolicyArns}
+      PermissionsBoundary:
+        'Fn::If':
+          - HasPermissionsBoundary
+          - {'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${PermissionsBoundaryPolicyName}'}
+          - {Ref: 'AWS::NoValue'}
 
   OidcProviderFunctionRole:
     Type: AWS::IAM::Role
