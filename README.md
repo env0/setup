@@ -17,16 +17,23 @@ It creates:
   `include_cost_data = false`.
 - **For an AWS Organization** (run in the management account):
   - the read role in every member account, through a service-managed StackSet;
-  - an `env-zero-deploy` role with `AdministratorAccess` in each picked member account (`deploy_account_ids`),
-    through the service-managed StackSet `<name>-deploy-roles` and `deploy-role.yaml`. It trusts env zero's OpenID
-    Connect issuer (adding the provider to the account, or env zero's audience to an existing one), or env zero's AWS
-    account with your env zero organization ID as External ID.
+  - a deploy role, `env0-deploy` by default, in each picked member account (`deploy_account_ids`), through the
+    service-managed StackSet `<name>-deploy-roles` and `deploy-role.yaml`. It has `AdministratorAccess` unless
+    `deploy_role_policy_arns` names other AWS managed policies, and an optional permissions boundary. It trusts either:
+    - with `oidc`, env zero's OpenID Connect tokens for your organization's subject, and only from deployments of the
+      projects in `deploy_project_ids`. The stack adds the provider to the account, or env zero's audience to an
+      existing one;
+    - with `assume_role`, your self-hosted env zero agent's role (`deploy_trusted_principal_arn`), with your env zero
+      organization ID as External ID.
 
-An Organization needs trusted access for CloudFormation StackSets turned on in AWS Organizations. Everything is created
-in `us-east-1`.
+An Organization needs trusted access for CloudFormation StackSets turned on in AWS Organizations. The Cloud Compass
+resources and the StackSets are in `us-east-1`. The deploy role stacks run in `deploy_roles_region`, `us-east-1` by
+default, so the Organization's SCPs must allow that region in the picked accounts.
 
 The Cloud Compass modules come from env zero's published archive, pinned by commit:
 `https://env0-cloud-compass-templates-prod.s3.amazonaws.com/<commit>/cloud-compass-opentofu.zip`.
+
+`aws/tests/` runs the template on a mocked AWS provider: `tofu init -backend=false && tofu test` in `aws/`.
 
 ### Variables
 
@@ -38,15 +45,19 @@ The Cloud Compass modules come from env zero's published archive, pinned by comm
 | `name` | `env0-cloud-compass` | Prefix of the resource names, unique in the AWS account. |
 | `include_cost_data` | `true` | Create the CUR 2.0 export and its bucket. |
 | `deploy_account_ids` | `[]` | Organization member accounts that get a deploy role. Not the management account. |
-| `deploy_role_name` | `env-zero-deploy` | Name of the deploy role in each member account. |
+| `deploy_role_name` | `env0-deploy` | Name of the deploy role in each member account. Give each setup its own, so two can share an account. |
+| `deploy_role_policy_arns` | `null` | 1 to 10 AWS managed policy ARNs for the deploy roles. `null` gives `AdministratorAccess`. |
+| `deploy_role_permissions_boundary_arn` | `""` | Permissions boundary of the deploy roles: a customer managed policy ARN. Each member account must have a policy with the same path and name. Empty for none. |
+| `deploy_roles_region` | `us-east-1` | Region the deploy role stacks run in. IAM is global; your SCPs must allow this region. |
 | `deploy_role_max_session_duration` | `18000` | Longest deploy role session, in seconds (3600 to 43200). |
-| `deploy_sign_in_method` | `oidc` | `oidc` or `assume_role`, as the deployment credential that runs the template. |
-| `env0_oidc_issuer` | `login.app.env0.com/` | env zero's OpenID Connect issuer, without the scheme. |
+| `deploy_sign_in_method` | `oidc` | How env zero signs in to the deploy roles: `oidc` or `assume_role`. |
+| `env0_oidc_issuer` | `login.app.env0.com/` | env zero's OpenID Connect issuer, without the scheme. Only env zero's issuers are accepted. |
 | `env0_oidc_subject` | `""` | Subject of your env zero organization's tokens. Needed with `oidc`. |
-| `env0_aws_account_id` | `913128560467` | env zero's AWS account. Used with `assume_role`. |
+| `deploy_project_ids` | `[]` | Up to 20 env zero project IDs whose deployments may use the deploy roles. Needed with `oidc`. Another project needs the template applied again. |
+| `deploy_trusted_principal_arn` | `""` | IAM role ARN of your self-hosted env zero agent. Needed with `assume_role`. |
 | `env0_organization_id` | `""` | Your env zero organization ID, the External ID. Needed with `assume_role`. |
 
 ### Outputs
 
 `role_arn`, `account_id`, `organization_id`, `cur_export_name`, `cur_bucket`, `cur_prefix`, and `deploy_role_arns`
-(deploy role ARN per member account ID).
+(deploy role ARN per member account ID, only for accounts whose stack instance is `CURRENT`).

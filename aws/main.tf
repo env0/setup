@@ -2,7 +2,13 @@ locals {
   organization = var.account_mode == "organization"
   # One account deploys with the role its deployment credential already uses.
   deploy_roles = local.organization && length(var.deploy_account_ids) > 0
-  region       = "us-east-1"
+  # IAM is global; the region is only where each member account's stack runs, so an SCP must allow it.
+  region = var.deploy_roles_region
+  deploy_role_policy_arns = (
+    var.deploy_role_policy_arns != null
+    ? var.deploy_role_policy_arns
+    : ["arn:${data.aws_partition.current.partition}:iam::aws:policy/AdministratorAccess"]
+  )
 }
 
 data "aws_partition" "current" {}
@@ -42,14 +48,17 @@ resource "aws_cloudformation_stack_set" "deploy_roles" {
   template_body    = file("${path.module}/deploy-role.yaml")
 
   parameters = {
-    RoleName           = var.deploy_role_name
-    MaxSessionDuration = var.deploy_role_max_session_duration
-    SignInMethod       = var.deploy_sign_in_method
-    OidcIssuer         = var.env0_oidc_issuer
-    OidcAudience       = "sts.amazonaws.com"
-    OidcSubject        = var.env0_oidc_subject
-    Env0AccountId      = var.env0_aws_account_id
-    Env0OrganizationId = var.env0_organization_id
+    RoleName                      = var.deploy_role_name
+    ManagedPolicyArns             = join(",", local.deploy_role_policy_arns)
+    PermissionsBoundaryPolicyName = try(split(":policy/", var.deploy_role_permissions_boundary_arn)[1], "")
+    MaxSessionDuration            = var.deploy_role_max_session_duration
+    SignInMethod                  = var.deploy_sign_in_method
+    OidcIssuer                    = var.env0_oidc_issuer
+    OidcAudience                  = "sts.amazonaws.com"
+    OidcSubject                   = var.env0_oidc_subject
+    AllowedProjectIds             = join(",", var.deploy_project_ids)
+    TrustedPrincipalArn           = var.deploy_trusted_principal_arn
+    Env0OrganizationId            = var.env0_organization_id
   }
 
   # Only the picked accounts, so a new account in the Organization gets no deploy role.
@@ -61,16 +70,27 @@ resource "aws_cloudformation_stack_set" "deploy_roles" {
     active = true
   }
 
+  # A template or parameter update reaches the accounts one at a time: this resource has no soft failure tolerance.
+  timeouts {
+    update = "2h"
+  }
+
   lifecycle {
     precondition {
-      condition     = var.deploy_sign_in_method == "oidc" ? var.env0_oidc_subject != "" : var.env0_organization_id != ""
-      error_message = "Deploy roles need env0_oidc_subject with oidc, or env0_organization_id with assume_role."
+      condition = (
+        var.deploy_sign_in_method == "oidc"
+        ? var.env0_oidc_subject != "" && length(var.deploy_project_ids) > 0
+        : var.env0_organization_id != "" && var.deploy_trusted_principal_arn != ""
+      )
+      error_message = "Deploy roles need env0_oidc_subject and deploy_project_ids with oidc, or env0_organization_id and deploy_trusted_principal_arn with assume_role."
     }
   }
 }
 
-# aws_cloudformation_stack_instances adds and removes accounts in place; a stack set instance replaces every account's
-# stack when its deployment targets change.
+# One resource for every picked account: a StackSet runs one operation at a time, and the provider's create does not
+# wait out another one, so instances per account would collide. A change of the list updates it in place: the
+# provider deletes only the removed accounts and creates with the whole list, both with INTERSECTION, so nothing
+# reaches an account outside the list. A stack set instance would instead replace every account's stack.
 resource "aws_cloudformation_stack_instances" "deploy_roles" {
   count          = local.deploy_roles ? 1 : 0
   stack_set_name = aws_cloudformation_stack_set.deploy_roles[0].name
@@ -83,10 +103,18 @@ resource "aws_cloudformation_stack_instances" "deploy_roles" {
     account_filter_type     = "INTERSECTION"
   }
 
+  # Under the default strict mode the concurrency is the failure tolerance plus one, so every account at once needs soft.
   operation_preferences {
+    concurrency_mode             = "SOFT_FAILURE_TOLERANCE"
     failure_tolerance_percentage = 0
     max_concurrent_percentage    = 100
     region_concurrency_type      = "PARALLEL"
+  }
+
+  timeouts {
+    create = "2h"
+    update = "2h"
+    delete = "2h"
   }
 
   # INTERSECTION drops an account outside the Organization, and a service-managed StackSet never deploys to the
