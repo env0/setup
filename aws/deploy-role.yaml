@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  env zero, member account. Creates the role that env zero deploys with, trusted by env zero's OpenID Connect issuer
+  or by env zero's AWS account with the env zero organization ID as External ID.
+
+Parameters:
+  RoleName:
+    Type: String
+    Description: Name of the deploy role, the same in every member account.
+    AllowedPattern: '^[\w+=,.@-]{1,64}$'
+    Default: env-zero-deploy
+  SignInMethod:
+    Type: String
+    Description: How env zero signs in, as its deployment credential does.
+    AllowedValues:
+      - oidc
+      - assume_role
+    Default: oidc
+  MaxSessionDuration:
+    Type: Number
+    Description: Longest session env zero can ask for, in seconds. env zero asks for 18000 unless the credential sets its own duration.
+    Default: 18000
+    MinValue: 3600
+    MaxValue: 43200
+  # No quote or backslash in the next four: the trust policy is JSON that Fn::Sub builds from them.
+  OidcIssuer:
+    Type: String
+    Description: env zero's OpenID Connect issuer without the scheme, with its trailing slash. OIDC only.
+    AllowedPattern: '^[^"\\]+$'
+    Default: login.app.env0.com/
+  OidcAudience:
+    Type: String
+    Description: Audience of env zero's v2 AWS token. OIDC only.
+    AllowedPattern: '^[^"\\]+$'
+    Default: sts.amazonaws.com
+  OidcSubject:
+    Type: String
+    Description: Subject of the env zero organization's tokens. OIDC only.
+    AllowedPattern: '^[^"\\]*$'
+    Default: ''
+  Env0AccountId:
+    Type: String
+    Description: env zero's AWS account. Assume role only.
+    AllowedPattern: '^\d{12}$'
+    Default: '913128560467'
+  Env0OrganizationId:
+    Type: String
+    Description: The env zero organization ID, which env zero sends as External ID. Assume role only.
+    AllowedPattern: '^[^"\\]*$'
+    Default: ''
+
+Rules:
+  OidcInputs:
+    RuleCondition: {'Fn::Equals': [{Ref: SignInMethod}, oidc]}
+    Assertions:
+      - Assert: {'Fn::Not': [{'Fn::Equals': [{Ref: OidcSubject}, '']}]}
+        AssertDescription: OIDC needs OidcSubject.
+  AssumeRoleInputs:
+    RuleCondition: {'Fn::Equals': [{Ref: SignInMethod}, assume_role]}
+    Assertions:
+      - Assert: {'Fn::Not': [{'Fn::Equals': [{Ref: Env0OrganizationId}, '']}]}
+        AssertDescription: Assume role needs Env0OrganizationId.
+
+Conditions:
+  UseOidc: {'Fn::Equals': [{Ref: SignInMethod}, oidc]}
+
+Resources:
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: {Ref: RoleName}
+      MaxSessionDuration: {Ref: MaxSessionDuration}
+      # A JSON string, because the OIDC condition keys hold the issuer and CloudFormation allows no intrinsic in a key.
+      AssumeRolePolicyDocument:
+        'Fn::If':
+          - UseOidc
+          # The provider's ARN comes from the custom resource, so IAM never sees a trust in a provider not made yet.
+          - 'Fn::Sub':
+              - >-
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"Federated":"${ProviderArn}"},
+                "Action":"sts:AssumeRoleWithWebIdentity",
+                "Condition":{"StringEquals":{"${OidcIssuer}:aud":"${OidcAudience}","${OidcIssuer}:sub":"${OidcSubject}"}}}]}
+              - ProviderArn: {'Fn::GetAtt': [OidcProvider, Arn]}
+          - 'Fn::Sub': >-
+              {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+              "Principal":{"AWS":"arn:${AWS::Partition}:iam::${Env0AccountId}:root"},
+              "Action":"sts:AssumeRole",
+              "Condition":{"StringEquals":{"sts:ExternalId":"${Env0OrganizationId}"}}}]}
+      ManagedPolicyArns:
+        - {'Fn::Sub': 'arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess'}
+
+  OidcProviderFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: UseOidc
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        # No logs:CreateLogGroup, so a late log write cannot recreate the log group after the stack delete.
+        - PolicyName: write-logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: {'Fn::GetAtt': [OidcProviderLogGroup, Arn]}
+        - PolicyName: oidc-provider
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateOpenIDConnectProvider
+                  - iam:TagOpenIDConnectProvider
+                  - iam:AddClientIDToOpenIDConnectProvider
+                Resource: {'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/${OidcIssuer}'}
+
+  OidcProviderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: UseOidc
+    Properties:
+      RetentionInDays: 14
+
+  # AWS::IAM::OIDCProvider fails when the account already has a provider for the issuer, which a customer's own
+  # env zero OIDC setup may own. This one adds the audience to it instead, and never deletes the provider.
+  # Same code as OidcProviderFunction in env zero's Cloud Compass templates, cloud-compass-single.yaml and
+  # cloud-compass-org.yaml, apart from the tag, the physical ID and Data: change them together.
+  OidcProviderFunction:
+    Type: AWS::Lambda::Function
+    Condition: UseOidc
+    Properties:
+      Description: Makes the account trust env zero's OpenID Connect issuer.
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 90
+      Role: {'Fn::GetAtt': [OidcProviderFunctionRole, Arn]}
+      LoggingConfig:
+        LogGroup: {Ref: OidcProviderLogGroup}
+      Code:
+        ZipFile: |
+          import json, time, urllib.request
+          import boto3
+          from botocore.config import Config
+
+          def request(url, body, method, content_type):
+              req = urllib.request.Request(url, data=json.dumps(body).encode(), method=method, headers={'Content-Type': content_type})
+              with urllib.request.urlopen(req, timeout=10) as res:
+                  return res.status
+
+          def code_of(e):
+              return (getattr(e, 'response', None) or {}).get('Error', {}).get('Code') or type(e).__name__
+
+          def handler(event, context):
+              props = event['ResourceProperties']
+              issuer, audience = props['Issuer'], props['Audience']
+              status, reason = 'SUCCESS', 'See CloudWatch logs'
+              try:
+                  if event['RequestType'] != 'Delete':
+                      client = boto3.client('iam', config=Config(connect_timeout=3, read_timeout=5, retries={'max_attempts': 3}))
+                      try:
+                          client.create_open_id_connect_provider(Url='https://' + issuer, ClientIDList=[audience], Tags=[{'Key': 'created-by', 'Value': 'env-zero-setup'}])
+                      except Exception as e:
+                          if code_of(e) != 'EntityAlreadyExists':
+                              raise
+                          client.add_client_id_to_open_id_connect_provider(OpenIDConnectProviderArn=props['ProviderArn'], ClientID=audience)
+              except Exception as e:
+                  print('OIDC provider failed:', code_of(e), e)
+                  status, reason = 'FAILED', ('OIDC provider failed: ' + code_of(e) + ': ' + str(e))[:500]
+              respond(event, status, reason)
+
+          def respond(event, status, reason):
+              body = {
+                  'Status': status,
+                  'Reason': reason,
+                  'PhysicalResourceId': event.get('PhysicalResourceId', 'env-zero-oidc-provider'),
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': {'Arn': event['ResourceProperties']['ProviderArn']},
+              }
+              # Three tries within 33 s, under the 90 s Lambda timeout.
+              for attempt in range(3):
+                  try:
+                      request(event['ResponseURL'], body, 'PUT', '')
+                      return
+                  except Exception as e:
+                      print('cloudformation response failed:', type(e).__name__, getattr(e, 'code', ''), 'attempt', attempt + 1)
+                      if attempt < 2:
+                          time.sleep(2 ** attempt)
+
+  OidcProvider:
+    Type: Custom::EnvZeroOidcProvider
+    Condition: UseOidc
+    Properties:
+      ServiceToken: {'Fn::GetAtt': [OidcProviderFunction, Arn]}
+      ServiceTimeout: 120
+      Issuer: {Ref: OidcIssuer}
+      Audience: {Ref: OidcAudience}
+      ProviderArn: {'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/${OidcIssuer}'}
+
+Outputs:
+  DeployRoleArn:
+    Description: ARN of the role env zero deploys with.
+    Value: {'Fn::GetAtt': [DeployRole, Arn]}
