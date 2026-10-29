@@ -167,6 +167,43 @@ run "leaves_out_an_account_whose_stack_is_not_current" {
   }
 }
 
+run "reports_the_stack_instance_status_of_every_account" {
+  command = apply
+  override_resource {
+    target = aws_cloudformation_stack_instances.deploy_roles
+    values = {
+      stack_instance_summaries = [
+        { account_id = "222222222222", region = "us-east-1", status = "CURRENT", detailed_status = "SUCCEEDED", status_reason = "", drift_status = "NOT_CHECKED", organizational_unit_id = "r-root", stack_id = "", stack_set_id = "" },
+        { account_id = "333333333333", region = "us-east-1", status = "OUTDATED", detailed_status = "FAILED", status_reason = "", drift_status = "NOT_CHECKED", organizational_unit_id = "r-root", stack_id = "", stack_set_id = "" },
+      ]
+    }
+  }
+  assert {
+    condition     = output.deploy_stack_instance_statuses == { "222222222222" = "CURRENT", "333333333333" = "OUTDATED" }
+    error_message = "an account whose update failed is reported, so its earlier role is not taken for gone"
+  }
+}
+
+run "reads_only_the_module_region_of_an_account_with_instances_in_two" {
+  command = apply
+  override_resource {
+    target = aws_cloudformation_stack_instances.deploy_roles
+    values = {
+      stack_instance_summaries = [
+        { account_id = "222222222222", region = "us-east-1", status = "CURRENT", detailed_status = "SUCCEEDED", status_reason = "", drift_status = "NOT_CHECKED", organizational_unit_id = "r-root", stack_id = "", stack_set_id = "" },
+        { account_id = "222222222222", region = "eu-west-1", status = "CURRENT", detailed_status = "SUCCEEDED", status_reason = "", drift_status = "NOT_CHECKED", organizational_unit_id = "r-root", stack_id = "", stack_set_id = "" },
+      ]
+    }
+  }
+  assert {
+    condition = (
+      output.deploy_stack_instance_statuses == { "222222222222" = "CURRENT" } &&
+      keys(output.deploy_role_arns) == ["222222222222"]
+    )
+    error_message = "an instance made outside the module in another region neither breaks nor changes the outputs"
+  }
+}
+
 run "rolls_out_to_every_account_at_once" {
   command = plan
   assert {
