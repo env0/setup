@@ -30,15 +30,25 @@ output "cur_prefix" {
 
 output "deploy_role_arns" {
   description = "ARN of the deploy role per member account ID, for the accounts whose stack instance is CURRENT."
-  # From the instances, not the list: a failed account's instance stays OUTDATED and its role may not exist.
+  # From the instances, not the list: a failed account's instance stays OUTDATED and its role may not exist. The read
+  # lists every instance of the StackSet, so one made outside the module in another region is left out.
   value = {
     for summary in flatten(aws_cloudformation_stack_instances.deploy_roles[*].stack_instance_summaries) :
     summary.account_id => "arn:${data.aws_partition.current.partition}:iam::${summary.account_id}:role/${var.deploy_role_name}"
-    if summary.status == "CURRENT" && contains(var.deploy_account_ids, summary.account_id)
+    if summary.region == local.region && summary.status == "CURRENT" && contains(var.deploy_account_ids, summary.account_id)
   }
 
   precondition {
     condition     = local.organization || length(var.deploy_account_ids) == 0
     error_message = "deploy_account_ids is for an Organization; one account deploys with its own role."
+  }
+}
+
+output "deploy_stack_instance_statuses" {
+  description = "Status of the deploy role's stack instance in deploy_roles_region per member account ID. An account with none there has no deploy role from this module; one that is not CURRENT may keep the role an earlier apply made."
+  # A failed StackSet update leaves accounts OUTDATED with their earlier role, and a later apply with no change succeeds.
+  value = {
+    for summary in flatten(aws_cloudformation_stack_instances.deploy_roles[*].stack_instance_summaries) :
+    summary.account_id => summary.status if summary.region == local.region
   }
 }
