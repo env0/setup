@@ -12,11 +12,15 @@ account.
 
 It creates:
 
-- **Cloud Compass read role.** `ReadOnlyAccess`, assumed by CloudQuery's sync role with an External ID.
+- **Cloud Compass read role.** `ReadOnlyAccess`. The Context Layer signs in to it either:
+  - with `assume_role` (the default), as its sync role with an External ID;
+  - with `oidc`, with your Context Layer workspace's OpenID Connect tokens. A stack adds the workspace's issuer to the
+    account as an OpenID Connect provider, or the workspace's audience to an existing one.
 - **CUR 2.0 export** to a private S3 bucket, and the read role's permission to read it. Off with
   `include_cost_data = false`.
 - **For an AWS Organization** (run in the management account):
-  - the read role in every member account, through a service-managed StackSet;
+  - the read role in every member account, through a service-managed StackSet. With `oidc`, the Context Layer signs in
+    to the management account's read role and assumes the member read roles from it;
   - a deploy role, `env0-deploy` by default, in each picked member account (`deploy_account_ids`), through the
     service-managed StackSet `<name>-deploy-roles` and `deploy-role.yaml`. It has `AdministratorAccess` unless
     `deploy_role_policy_arns` names other AWS managed policies, and an optional permissions boundary. It trusts either:
@@ -40,8 +44,12 @@ The Cloud Compass modules come from env zero's published archive, pinned by comm
 | Name | Default | Description |
 | --- | --- | --- |
 | `account_mode` | required | `single` for one AWS account, `organization` for an AWS Organization. |
-| `cloudquery_role_arn` | required | ARN of the CloudQuery sync role that assumes the read role. |
-| `external_id` | required | External ID the CloudQuery sync role sends. Sensitive. |
+| `context_layer_sign_in_method` | `assume_role` | How the Context Layer signs in to the read role: `assume_role` or `oidc`. |
+| `context_layer_role_arn` | `null` | ARN of the Context Layer sync role that assumes the read role. Needed with `assume_role`. |
+| `external_id` | `null` | External ID the Context Layer sync role sends. Sensitive. Needed with `assume_role`. |
+| `context_layer_oidc_issuer` | `null` | OpenID Connect issuer of your Context Layer workspace, without the scheme. Needed with `oidc`. |
+| `context_layer_oidc_audience` | `null` | Audience of your Context Layer workspace's tokens. Needed with `oidc`. |
+| `context_layer_oidc_subject` | `null` | Subject of your Context Layer workspace's tokens. Needed with `oidc`. |
 | `name` | `env0-cloud-compass` | Prefix of the resource names, unique in the AWS account. |
 | `include_cost_data` | `true` | Create the CUR 2.0 export and its bucket. |
 | `deploy_account_ids` | `[]` | Organization member accounts that get a deploy role. Not the management account. |
@@ -59,5 +67,7 @@ The Cloud Compass modules come from env zero's published archive, pinned by comm
 
 ### Outputs
 
-`role_arn`, `account_id`, `organization_id`, `cur_export_name`, `cur_bucket`, `cur_prefix`, and `deploy_role_arns`
-(deploy role ARN per member account ID, only for accounts whose stack instance is `CURRENT`).
+`role_arn`, `account_id`, `organization_id`, `cur_export_name`, `cur_bucket`, `cur_prefix`, `deploy_role_arns`
+(deploy role ARN per member account ID, only for accounts whose stack instance is `CURRENT`), and
+`deploy_stack_instance_statuses` (status of the deploy role's stack instance in `deploy_roles_region` per member
+account ID).

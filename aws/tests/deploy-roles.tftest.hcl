@@ -35,13 +35,13 @@ mock_provider "aws" {
 }
 
 variables {
-  account_mode         = "organization"
-  cloudquery_role_arn  = "arn:aws:iam::123456789012:role/syncs"
-  external_id          = "external-id"
-  env0_oidc_subject    = "auth0|oidc-user-1"
-  env0_organization_id = "8c5b3f6e-0d1a-4e2b-9f3c-1a2b3c4d5e6f"
-  deploy_account_ids   = ["222222222222", "333333333333"]
-  deploy_project_ids   = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f", "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b"]
+  account_mode           = "organization"
+  context_layer_role_arn = "arn:aws:iam::123456789012:role/syncs"
+  external_id            = "external-id"
+  env0_oidc_subject      = "auth0|oidc-user-1"
+  env0_organization_id   = "8c5b3f6e-0d1a-4e2b-9f3c-1a2b3c4d5e6f"
+  deploy_account_ids     = ["222222222222", "333333333333"]
+  deploy_project_ids     = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f", "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b"]
 }
 
 run "targets_only_the_picked_accounts" {
