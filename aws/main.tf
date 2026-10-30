@@ -16,20 +16,28 @@ data "aws_partition" "current" {}
 # No callback: env zero reads the outputs when the deployment completes.
 module "single" {
   count  = local.organization ? 0 : 1
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/68ab591f3201/cloud-compass-opentofu.zip//cloud-compass-single"
+  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/8293cd86e1eb/cloud-compass-opentofu.zip//cloud-compass-single"
 
+  sign_in_method      = var.cloudquery_sign_in_method
   cloudquery_role_arn = var.cloudquery_role_arn
   external_id         = var.external_id
+  oidc_issuer         = var.cloudquery_oidc_issuer
+  oidc_audience       = var.cloudquery_oidc_audience
+  oidc_subject        = var.cloudquery_oidc_subject
   name                = var.name
   include_cost_data   = var.include_cost_data
 }
 
 module "organization" {
   count  = local.organization ? 1 : 0
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/68ab591f3201/cloud-compass-opentofu.zip//cloud-compass-org"
+  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/8293cd86e1eb/cloud-compass-opentofu.zip//cloud-compass-org"
 
+  sign_in_method      = var.cloudquery_sign_in_method
   cloudquery_role_arn = var.cloudquery_role_arn
   external_id         = var.external_id
+  oidc_issuer         = var.cloudquery_oidc_issuer
+  oidc_audience       = var.cloudquery_oidc_audience
+  oidc_subject        = var.cloudquery_oidc_subject
   name                = var.name
   include_cost_data   = var.include_cost_data
 }

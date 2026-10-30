@@ -160,7 +160,8 @@ Resources:
   # AWS::IAM::OIDCProvider fails when the account already has a provider for the issuer, which a customer's own
   # env zero OIDC setup may own. This one adds the audience to it instead, and never deletes the provider.
   # Same code as OidcProviderFunction in env zero's Cloud Compass templates, cloud-compass-single.yaml and
-  # cloud-compass-org.yaml, apart from the tag, the physical ID and Data: change them together.
+  # cloud-compass-org.yaml, and in cloud-compass-oidc-provider/oidc-provider.yaml, apart from the tag, the physical ID
+  # and Data: change them together.
   OidcProviderFunction:
     Type: AWS::Lambda::Function
     Condition: UseOidc
