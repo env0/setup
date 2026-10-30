@@ -14,15 +14,41 @@ variable "name" {
   default     = "env0-cloud-compass"
 }
 
-variable "cloudquery_role_arn" {
-  description = "ARN of the CloudQuery sync role that can assume the Cloud Compass read role."
+variable "cloudquery_sign_in_method" {
+  description = "How CloudQuery signs in to the Cloud Compass read role: assume_role, as its sync role with the External ID, or oidc, with the tenant's web identity."
   type        = string
+  default     = "assume_role"
+}
+
+variable "cloudquery_role_arn" {
+  description = "With assume_role: ARN of the CloudQuery sync role that can assume the Cloud Compass read role."
+  type        = string
+  default     = null
 }
 
 variable "external_id" {
-  description = "External ID that the CloudQuery sync role must send (sts:ExternalId)."
+  description = "With assume_role: External ID that the CloudQuery sync role must send (sts:ExternalId)."
   type        = string
+  default     = null
   sensitive   = true
+}
+
+variable "cloudquery_oidc_issuer" {
+  description = "With oidc: the OpenID Connect issuer of the CloudQuery tenant, without https://."
+  type        = string
+  default     = null
+}
+
+variable "cloudquery_oidc_audience" {
+  description = "With oidc: the audience of the CloudQuery tenant tokens."
+  type        = string
+  default     = null
+}
+
+variable "cloudquery_oidc_subject" {
+  description = "With oidc: the subject of the CloudQuery tenant tokens."
+  type        = string
+  default     = null
 }
 
 variable "include_cost_data" {
