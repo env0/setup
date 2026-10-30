@@ -44,12 +44,12 @@ The Cloud Compass modules come from env zero's published archive, pinned by comm
 | Name | Default | Description |
 | --- | --- | --- |
 | `account_mode` | required | `single` for one AWS account, `organization` for an AWS Organization. |
-| `cloudquery_sign_in_method` | `assume_role` | How the Context Layer signs in to the read role: `assume_role` or `oidc`. |
-| `cloudquery_role_arn` | `null` | ARN of the Context Layer sync role that assumes the read role. Needed with `assume_role`. |
+| `context_layer_sign_in_method` | `assume_role` | How the Context Layer signs in to the read role: `assume_role` or `oidc`. |
+| `context_layer_role_arn` | `null` | ARN of the Context Layer sync role that assumes the read role. Needed with `assume_role`. |
 | `external_id` | `null` | External ID the Context Layer sync role sends. Sensitive. Needed with `assume_role`. |
-| `cloudquery_oidc_issuer` | `null` | OpenID Connect issuer of your Context Layer workspace, without the scheme. Needed with `oidc`. |
-| `cloudquery_oidc_audience` | `null` | Audience of your Context Layer workspace's tokens. Needed with `oidc`. |
-| `cloudquery_oidc_subject` | `null` | Subject of your Context Layer workspace's tokens. Needed with `oidc`. |
+| `context_layer_oidc_issuer` | `null` | OpenID Connect issuer of your Context Layer workspace, without the scheme. Needed with `oidc`. |
+| `context_layer_oidc_audience` | `null` | Audience of your Context Layer workspace's tokens. Needed with `oidc`. |
+| `context_layer_oidc_subject` | `null` | Subject of your Context Layer workspace's tokens. Needed with `oidc`. |
 | `name` | `env0-cloud-compass` | Prefix of the resource names, unique in the AWS account. |
 | `include_cost_data` | `true` | Create the CUR 2.0 export and its bucket. |
 | `deploy_account_ids` | `[]` | Organization member accounts that get a deploy role. Not the management account. |
