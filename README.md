@@ -6,9 +6,10 @@ Templates that env zero deploys in your cloud accounts to give itself access.
 
 The "env zero aws roles" OpenTofu template. On the Add Cloud Compass credential page, pick the environment option:
 env zero deploys `aws/` as an environment in its "env zero setup" project, with an organization-level AWS deployment
-credential, and asks you to approve the plan before it applies. When the deployment finishes, env zero reads the
-outputs and creates the Cloud Compass credential, and for an Organization one deployment credential per picked member
-account.
+credential, and asks you to approve the plan before it applies. When the deployment finishes, env zero stores the
+outputs, and for an Organization creates one deployment credential per picked member account. The Add page then
+verifies the read role and creates the Cloud Compass credential (one account), or asks you to pick OUs first
+(Organization).
 
 It creates:
 
