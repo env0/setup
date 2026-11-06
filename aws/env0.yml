@@ -1,0 +1,11 @@
+version: 2
+
+destroy:
+  steps:
+    # Keeps the CUR bucket and its reports on AWS. A destroy cannot delete a bucket AWS has written to, and a step
+    # after the plan would make the saved plan stale. The destroy still deletes the export and the bucket policy.
+    opentofuPlan:
+      before:
+        - name: Keep the CUR bucket
+          run: |
+            tofu state list | grep '\.aws_s3_bucket\.cur\[0\]$' | while read -r address; do tofu state rm "$address"; done
