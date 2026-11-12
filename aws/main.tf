@@ -16,7 +16,7 @@ data "aws_partition" "current" {}
 # No callback: env zero reads the outputs when the deployment completes.
 module "single" {
   count  = local.organization ? 0 : 1
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/0977dc8bd932/cloud-compass-opentofu.zip//cloud-compass-single"
+  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/8f4bdbbc5257/cloud-compass-opentofu.zip//cloud-compass-single"
 
   sign_in_method      = var.context_layer_sign_in_method
   cloudquery_role_arn = var.context_layer_role_arn
@@ -30,7 +30,7 @@ module "single" {
 
 module "organization" {
   count  = local.organization ? 1 : 0
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/0977dc8bd932/cloud-compass-opentofu.zip//cloud-compass-org"
+  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/8f4bdbbc5257/cloud-compass-opentofu.zip//cloud-compass-org"
 
   sign_in_method      = var.context_layer_sign_in_method
   cloudquery_role_arn = var.context_layer_role_arn
