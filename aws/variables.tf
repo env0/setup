@@ -57,6 +57,12 @@ variable "include_cost_data" {
   default     = true
 }
 
+variable "read_roles_redeploy_token" {
+  description = "Organization: change it to deploy the member accounts' read roles again, as env zero's Retry does when one's stack failed."
+  type        = string
+  default     = ""
+}
+
 variable "deploy_account_ids" {
   description = "Organization member accounts that get a deploy role. The management account deploys with the role env zero already has there."
   type        = list(string)

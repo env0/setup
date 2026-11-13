@@ -16,7 +16,7 @@ data "aws_partition" "current" {}
 # No callback: env zero reads the outputs when the deployment completes.
 module "single" {
   count  = local.organization ? 0 : 1
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/6ed5d1730740/cloud-compass-opentofu.zip//cloud-compass-single"
+  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/a5249a2c9df0/cloud-compass-opentofu.zip//cloud-compass-single"
 
   sign_in_method      = var.context_layer_sign_in_method
   cloudquery_role_arn = var.context_layer_role_arn
@@ -30,16 +30,17 @@ module "single" {
 
 module "organization" {
   count  = local.organization ? 1 : 0
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/6ed5d1730740/cloud-compass-opentofu.zip//cloud-compass-org"
+  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/a5249a2c9df0/cloud-compass-opentofu.zip//cloud-compass-org"
 
-  sign_in_method      = var.context_layer_sign_in_method
-  cloudquery_role_arn = var.context_layer_role_arn
-  external_id         = var.external_id
-  oidc_issuer         = var.context_layer_oidc_issuer
-  oidc_audience       = var.context_layer_oidc_audience
-  oidc_subject        = var.context_layer_oidc_subject
-  name                = var.name
-  include_cost_data   = var.include_cost_data
+  sign_in_method         = var.context_layer_sign_in_method
+  cloudquery_role_arn    = var.context_layer_role_arn
+  external_id            = var.external_id
+  oidc_issuer            = var.context_layer_oidc_issuer
+  oidc_audience          = var.context_layer_oidc_audience
+  oidc_subject           = var.context_layer_oidc_subject
+  name                   = var.name
+  include_cost_data      = var.include_cost_data
+  members_redeploy_token = var.read_roles_redeploy_token
 }
 
 data "aws_organizations_organization" "current" {
