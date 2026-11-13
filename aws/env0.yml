@@ -2,10 +2,53 @@ version: 2
 
 destroy:
   steps:
-    # Keeps the CUR bucket and its reports on AWS. A destroy cannot delete a bucket AWS has written to, and a step
-    # after the plan would make the saved plan stale. The destroy still deletes the export and the bucket policy.
+    # A destroy cannot delete a bucket AWS has written to, and a step after the plan would make the saved plan stale, so
+    # the CUR bucket leaves the state before the plan. The destroy still deletes the export and the bucket policy.
+    # .cur-buckets keeps the bucket for the step after the destroy. A destroy without "checkout updated code" gets the
+    # project root, and with it the file, back from the run before; any other finds the bucket through the export.
     opentofuPlan:
       before:
-        - name: Keep the CUR bucket
+        - name: Forget the CUR bucket
           run: |
+            tofu state pull | jq -r '
+              .resources[]? | select(.mode == "managed" and .name == "cur") | .type as $type | .instances[].attributes
+              | if $type == "aws_s3_bucket" then "\(.bucket) \(.region)"
+                elif $type == "aws_bcmdataexports_export" then
+                  .export[]?.destination_configurations[]?.s3_destination[]? | "\(.s3_bucket) \(.s3_region)"
+                else empty end' >> .cur-buckets
             tofu state list | grep '\.aws_s3_bucket\.cur\[0\]$' | while read -r address; do tofu state rm "$address"; done
+    # AWS writes aws-programmatic-access-test-object at the bucket's root when it creates the export, so a bucket that
+    # never got a report still holds it. With the export gone, the bucket is deleted unless anything else is in it.
+    # Any failure keeps the bucket rather than failing the destroy, which would leave the setup's credentials behind.
+    opentofuDestroy:
+      after:
+        - name: Delete the CUR bucket unless it holds reports
+          run: |
+            key=aws-programmatic-access-test-object
+            [ -s .cur-buckets ] || exit 0
+            if ! command -v aws > /dev/null; then
+              echo "Kept the CUR bucket, as the aws CLI is not installed: $(sort -u .cur-buckets | tr '\n' ' ')"
+              exit 0
+            fi
+            errors=$(mktemp)
+            trap 'rm -f "$errors"' EXIT
+            keep() {
+              echo "Kept the CUR bucket $bucket, as AWS answered:" >&2
+              cat "$errors" >&2
+            }
+            sort -u .cur-buckets | while read -r bucket region; do
+              if ! versions=$(aws s3api list-object-versions --region "$region" --bucket "$bucket" --prefix "$key" --output json 2> "$errors"); then
+                if grep -q NoSuchBucket "$errors"; then echo "The CUR bucket $bucket is already deleted."; else keep; fi
+                continue
+              fi
+              for version in $(printf '%s' "$versions" | jq -r --arg key "$key" '(.Versions // []) + (.DeleteMarkers // []) | .[] | select(.Key == $key) | .VersionId'); do
+                aws s3api delete-object --region "$region" --bucket "$bucket" --key "$key" --version-id "$version" > /dev/null 2> "$errors" || { keep; continue 2; }
+              done
+              if aws s3api delete-bucket --region "$region" --bucket "$bucket" 2> "$errors"; then
+                echo "Deleted the CUR bucket $bucket."
+              elif grep -q BucketNotEmpty "$errors"; then
+                echo "Kept the CUR bucket $bucket, as it holds reports."
+              else
+                keep
+              fi
+            done
