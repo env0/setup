@@ -1,5 +1,26 @@
 version: 2
 
+deploy:
+  steps:
+    opentofuApply:
+      after:
+        - name: Check the deploy roles are current
+          run: |
+            name=$(tofu output -json deploy_stack_set_name | jq -r '.')
+            [ "$name" != null ] || exit 0
+            region=$(tofu output -json deploy_stack_set_region | jq -r '.')
+            problem() {
+              echo "$1" >&2
+              [ "${ENV0_SETUP_STRICT_INSTANCE_CHECK:-}" != true ] || exit 1
+              exit 0
+            }
+            command -v aws > /dev/null || problem "The aws CLI is not installed, so the deploy roles in the member accounts cannot be checked."
+            instances=$(aws cloudformation list-stack-instances --region us-east-1 --stack-set-name "$name" --call-as SELF --stack-instance-region "$region" --output json) || problem "AWS could not list the deploy roles' stack instances, so they cannot be checked."
+            printf '%s' "$instances" | jq -e '.Summaries | type == "array"' > /dev/null || problem "AWS did not answer with a list of stack instances, so the deploy roles cannot be checked."
+            stale=$(printf '%s' "$instances" | jq -r '.Summaries[] | select(.Status != "CURRENT") | "\(.Account) \(.Status) \(.StatusReason // "")"')
+            [ -z "$stale" ] || problem "The deploy role is not current in these accounts, so a project removed from one may still sign in there:
+            $stale"
+
 destroy:
   steps:
     # A destroy cannot delete a bucket AWS has written to, and a step after the plan would make the saved plan stale, so
@@ -16,7 +37,7 @@ destroy:
                 elif $type == "aws_bcmdataexports_export" then
                   .export[]?.destination_configurations[]?.s3_destination[]? | "\(.s3_bucket) \(.s3_region)"
                 else empty end' >> .cur-buckets
-            tofu state list | grep '\.aws_s3_bucket\.cur\[0\]$' | while read -r address; do tofu state rm "$address"; done
+            tofu state list | grep -E '(^|\.)aws_s3_bucket\.cur\[(0|"single"|"organization")\]$' | while read -r address; do tofu state rm "$address"; done
     # AWS writes aws-programmatic-access-test-object at the bucket's root when it creates the export, so a bucket that
     # never got a report still holds it. With the export gone, the bucket is deleted unless anything else is in it.
     # Any failure keeps the bucket rather than failing the destroy, which would leave the setup's credentials behind.

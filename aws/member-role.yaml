@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  env0 Cloud Compass, member account. Creates a read-only role for the CloudQuery sync role, or with OIDC
+  for the management account read role.
+
+# RedeployToken is used by no resource on purpose: only a new value matters, which updates every member stack.
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001
+
+Parameters:
+  CloudQueryRoleArn:
+    Type: String
+    Description: ARN of the role that can assume the read role.
+    AllowedPattern: '^arn:aws:iam::\d{12}:role/.+$'
+  ExternalId:
+    Type: String
+    Description: External ID that the role must send (sts:ExternalId). Empty with OIDC.
+    AllowedPattern: '^(.{2,})?$'
+    MaxLength: 1224
+    Default: ''
+  SignInMethod:
+    Type: String
+    Description: How CloudQuery signs in, as in the management account stack.
+    AllowedValues:
+      - assume_role
+      - oidc
+    Default: assume_role
+  RoleName:
+    Type: String
+    Description: Name of the read role, the same as in the management account.
+    AllowedPattern: '^[\w+=,.@-]{1,64}$'
+  IncludeCostData:
+    Type: String
+    Description: Give the read role the CUR read policy.
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+  RedeployToken:
+    Type: String
+    Description: Used by no resource. A new value updates the stack, so a stack instance that failed is deployed again.
+    Default: ''
+
+Conditions:
+  CostDataIncluded: {'Fn::Equals': [{Ref: IncludeCostData}, 'true']}
+  UseOidc: {'Fn::Equals': [{Ref: SignInMethod}, oidc]}
+
+Resources:
+  ReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: {Ref: RoleName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # The management account read role does not exist yet when the StackSet runs, and a trust policy
+          # cannot name a missing role, so OIDC trusts its account and checks the role ARN.
+          - 'Fn::If':
+              - UseOidc
+              - Effect: Allow
+                Principal:
+                  AWS:
+                    'Fn::Sub':
+                      - 'arn:${AWS::Partition}:iam::${Account}:root'
+                      - Account: {'Fn::Select': [4, {'Fn::Split': [':', {Ref: CloudQueryRoleArn}]}]}
+                Action: sts:AssumeRole
+                Condition:
+                  ArnEquals:
+                    aws:PrincipalArn: {Ref: CloudQueryRoleArn}
+              - Effect: Allow
+                Principal:
+                  AWS: {Ref: CloudQueryRoleArn}
+                Action: sts:AssumeRole
+                Condition:
+                  StringEquals:
+                    sts:ExternalId: {Ref: ExternalId}
+      ManagedPolicyArns:
+        - {'Fn::Sub': 'arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess'}
+      Policies:
+        - 'Fn::If':
+            - CostDataIncluded
+            - PolicyName: cur-read
+              PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                  - Effect: Allow
+                    Action:
+                      - bcm-data-exports:GetExport
+                      - bcm-data-exports:ListExports
+                      - bcm-data-exports:GetTable
+                      - bcm-data-exports:ListTables
+                    Resource: '*'
+            - {Ref: 'AWS::NoValue'}
+        # CloudQuery's assetInventoryAdditionalReadActions (cdk-onboarding/lib/common/iam.ts), which ReadOnlyAccess lacks.
+        - PolicyName: additional-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - quicksight:ListGroups
+                  - quicksight:ListUsers
+                Resource: '*'
+        # CloudQuery's org onboarding Deny list (cloudquery/platform cloudformation/cdk-onboarding/lib/common/iam.ts).
+        - PolicyName: default-deny
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Deny
+                Action:
+                  - cloudformation:GetTemplate
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - ec2:GetConsoleOutput
+                  - ec2:GetConsoleScreenshot
+                  - ecr:BatchGetImage
+                  - ecr:GetAuthorizationToken
+                  - ecr:GetDownloadUrlForLayer
+                  - kinesis:Get*
+                  - lambda:GetFunction
+                  - logs:GetLogEvents
+                  - s3:GetObject
+                  - sdb:Select*
+                  - sqs:ReceiveMessage
+                  - secretsmanager:GetSecretValue
+                  - ssm:GetCommandInvocation
+                  - ssm:GetParameter*
+                Resource: '*'
+
+Outputs:
+  RoleArn:
+    Description: ARN of the read role for the CloudQuery sync role.
+    Value: {'Fn::GetAtt': [ReadRole, Arn]}

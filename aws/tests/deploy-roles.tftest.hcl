@@ -26,6 +26,9 @@ mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::111111111111:role/mock" }
   }
+  mock_resource "aws_cloudformation_stack" {
+    defaults = { outputs = { ProviderArn = "arn:aws:iam::111111111111:oidc-provider/login.app.env0.com/" } }
+  }
   mock_resource "aws_iam_policy" {
     defaults = { arn = "arn:aws:iam::111111111111:policy/mock" }
   }
@@ -118,6 +121,25 @@ run "passes_the_role_settings_to_the_stack_set" {
       aws_cloudformation_stack_set.deploy_roles[0].auto_deployment[0].enabled == false
     )
     error_message = "the StackSet takes the setup's names, the 5-hour session, and no auto-deployment"
+  }
+}
+
+run "keeps_the_shared_read_role_name_of_a_setup_from_before_the_variable" {
+  command = plan
+  assert {
+    condition     = aws_cloudformation_stack_set.cloud_compass_read[0].parameters["RoleName"] == "env0-cloud-compass-read" && aws_iam_role.read["organization"].name == "env0-cloud-compass-read"
+    error_message = "a setup without read_role_name keeps the read roles it made"
+  }
+}
+
+run "gives_the_read_roles_the_setup_name" {
+  command = plan
+  variables {
+    read_role_name = "env0-cloud-compass-read-abcd1234"
+  }
+  assert {
+    condition     = aws_cloudformation_stack_set.cloud_compass_read[0].parameters["RoleName"] == "env0-cloud-compass-read-abcd1234" && aws_iam_role.read["organization"].name == "env0-cloud-compass-read-abcd1234"
+    error_message = "the Organization read roles take the setup's name"
   }
 }
 
@@ -311,11 +333,11 @@ run "refuses_assume_role_without_a_trusted_principal" {
   expect_failures = [aws_cloudformation_stack_set.deploy_roles]
 }
 
-run "refuses_a_trusted_principal_that_is_not_a_role" {
+run "refuses_a_trusted_principal_that_is_not_a_role_or_an_account_root" {
   command = plan
   variables {
     deploy_sign_in_method        = "assume_role"
-    deploy_trusted_principal_arn = "arn:aws:iam::111111111111:root"
+    deploy_trusted_principal_arn = "arn:aws:iam::111111111111:user/someone"
   }
   expect_failures = [var.deploy_trusted_principal_arn]
 }
@@ -452,4 +474,360 @@ run "refuses_a_policy_with_a_comma" {
     deploy_role_policy_arns = ["arn:aws:iam::aws:policy/PowerUserAccess,ReadOnlyAccess"]
   }
   expect_failures = [var.deploy_role_policy_arns]
+}
+
+run "renders_each_accounts_own_projects_into_the_stack_set_template" {
+  command = plan
+  variables {
+    deploy_account_ids = ["222222222222", "333333333333", "444444444444"]
+    deploy_project_ids_by_account = {
+      "222222222222" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+      "333333333333" = ["9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b", "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"]
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(aws_cloudformation_stack_set.deploy_roles[0].template_body).Mappings.AccountProjects) == jsonencode({
+      "222222222222" = { Ids = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"] }
+      "333333333333" = { Ids = ["9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b", "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f"] }
+      "444444444444" = { Ids = ["none"] }
+    })
+    error_message = "each account gets its own list, and an account with none gets a value no project ID matches"
+  }
+}
+
+run "does_not_trust_a_project_in_an_account_whose_list_lacks_it" {
+  command = plan
+  variables {
+    deploy_account_ids = ["222222222222", "333333333333"]
+    deploy_project_ids_by_account = {
+      "222222222222" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+      "333333333333" = ["9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b"]
+    }
+  }
+  assert {
+    condition = (
+      !contains(yamldecode(aws_cloudformation_stack_set.deploy_roles[0].template_body).Mappings.AccountProjects["222222222222"].Ids, "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b") &&
+      !contains(yamldecode(aws_cloudformation_stack_set.deploy_roles[0].template_body).Mappings.AccountProjects["333333333333"].Ids, "0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f")
+    )
+    error_message = "a project outside an account's list is not in that account's trust"
+  }
+}
+
+run "reads_the_trust_of_every_account_from_the_mapping" {
+  command = plan
+  variables {
+    deploy_project_ids_by_account = {
+      "222222222222" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+    }
+  }
+  assert {
+    condition = (
+      strcontains(aws_cloudformation_stack_set.deploy_roles[0].template_body, "Fn::FindInMap") &&
+      contains(keys(yamldecode(aws_cloudformation_stack_set.deploy_roles[0].template_body).Resources.DeployRole.Properties.AssumeRolePolicyDocument["Fn::If"][1]["Fn::Sub"][1].ProjectIds["Fn::Join"][1]), "Fn::FindInMap") &&
+      aws_cloudformation_stack_set.deploy_roles[0].parameters["AllowedProjectIds"] == ""
+    )
+    error_message = "the member role's trust takes its projects from the account's mapping, so one StackSet update reaches every account"
+  }
+}
+
+run "keeps_the_template_of_a_setup_from_before_the_variable" {
+  command = plan
+  assert {
+    condition     = aws_cloudformation_stack_set.deploy_roles[0].template_body == file("deploy-role.yaml")
+    error_message = "without the per-account map the StackSet template is the file, byte for byte"
+  }
+}
+
+run "accepts_env_zeros_account_root_with_assume_role" {
+  command = plan
+  variables {
+    deploy_sign_in_method        = "assume_role"
+    deploy_project_ids           = []
+    deploy_trusted_principal_arn = "arn:aws:iam::913128560467:root"
+  }
+  assert {
+    condition = (
+      aws_cloudformation_stack_set.deploy_roles[0].parameters["TrustedPrincipalArn"] == "arn:aws:iam::913128560467:root" &&
+      strcontains(aws_cloudformation_stack_set.deploy_roles[0].template_body, "(root|role/")
+    )
+    error_message = "the root of env zero's account passes the module and the StackSet template"
+  }
+}
+
+run "gives_the_management_account_a_deploy_role_with_the_member_trust" {
+  command = apply
+  variables {
+    deploy_management_account = true
+    deploy_project_ids_by_account = {
+      "111111111111" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+    }
+  }
+  assert {
+    condition = (
+      length(aws_iam_role.deploy_management) == 1 &&
+      length(aws_iam_role.deploy) == 0 &&
+      aws_iam_role.deploy_management[0].name == "env0-deploy" &&
+      aws_iam_role.deploy_management[0].max_session_duration == 18000 &&
+      keys(aws_iam_role_policy_attachment.deploy_management) == ["arn:aws:iam::aws:policy/AdministratorAccess"]
+    )
+    error_message = "one role with AdministratorAccess and the 5-hour session, as the member roles"
+  }
+  assert {
+    condition = jsonencode([for statement in data.aws_iam_policy_document.deploy_trust[0].statement : {
+      actions    = statement.actions
+      conditions = { for condition in statement.condition : condition.variable => condition.values }
+      }]) == jsonencode([{
+      actions = ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"]
+      conditions = {
+        "aws:RequestTag/projectId" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+        "login.app.env0.com/:aud"  = ["sts.amazonaws.com"]
+        "login.app.env0.com/:sub"  = ["auth0|oidc-user-1"]
+      }
+    }])
+    error_message = "the management role trusts env zero tokens of the account's projects with session tags"
+  }
+  assert {
+    condition     = output.deploy_role_arns["111111111111"] == "arn:aws:iam::111111111111:role/mock"
+    error_message = "the management account's role is an output"
+  }
+}
+
+run "gives_one_account_a_deploy_role_with_the_same_trust" {
+  command = apply
+  variables {
+    account_mode          = "single"
+    deploy_account_ids    = []
+    deploy_single_account = true
+    deploy_project_ids_by_account = {
+      "111111111111" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+    }
+  }
+  assert {
+    condition = (
+      length(aws_iam_role.deploy) == 1 &&
+      length(aws_iam_role.deploy_management) == 0 &&
+      length(aws_cloudformation_stack_set.deploy_roles) == 0
+    )
+    error_message = "one account gets a plain role and no StackSet"
+  }
+  assert {
+    condition = jsonencode([for statement in data.aws_iam_policy_document.deploy_trust[0].statement : {
+      actions    = statement.actions
+      conditions = { for condition in statement.condition : condition.variable => condition.values }
+      }]) == jsonencode([{
+      actions = ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"]
+      conditions = {
+        "aws:RequestTag/projectId" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+        "login.app.env0.com/:aud"  = ["sts.amazonaws.com"]
+        "login.app.env0.com/:sub"  = ["auth0|oidc-user-1"]
+      }
+    }])
+    error_message = "the one-account role trusts env zero tokens of the account's projects with session tags"
+  }
+  assert {
+    condition     = output.deploy_role_arns == { "111111111111" = "arn:aws:iam::111111111111:role/mock" }
+    error_message = "the one-account role is the only deploy role ARN"
+  }
+}
+
+run "trusts_no_project_in_an_account_missing_from_the_map" {
+  command = plan
+  variables {
+    account_mode          = "single"
+    deploy_account_ids    = []
+    deploy_single_account = true
+    deploy_project_ids_by_account = {
+      "999999999999" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+    }
+  }
+  assert {
+    condition     = jsonencode({ for condition in data.aws_iam_policy_document.deploy_trust[0].statement[0].condition : condition.variable => condition.values }["aws:RequestTag/projectId"]) == jsonencode(["none"])
+    error_message = "an account with no project gets a value no project ID matches"
+  }
+}
+
+run "trusts_the_assume_role_principal_with_the_external_id_for_a_deploy_role" {
+  command = plan
+  variables {
+    account_mode                 = "single"
+    deploy_account_ids           = []
+    deploy_single_account        = true
+    deploy_sign_in_method        = "assume_role"
+    deploy_project_ids           = []
+    deploy_trusted_principal_arn = "arn:aws:iam::913128560467:root"
+  }
+  assert {
+    condition = (
+      jsonencode(one(data.aws_iam_policy_document.deploy_trust[0].statement[0].principals).identifiers) == jsonencode(["arn:aws:iam::913128560467:root"]) &&
+      jsonencode(one(data.aws_iam_policy_document.deploy_trust[0].statement[0].condition).values) == jsonencode(["8c5b3f6e-0d1a-4e2b-9f3c-1a2b3c4d5e6f"])
+    )
+    error_message = "env zero's account plus the External ID"
+  }
+}
+
+run "takes_the_boundary_and_policies_for_the_one_account_role" {
+  command = plan
+  variables {
+    account_mode                         = "single"
+    deploy_account_ids                   = []
+    deploy_single_account                = true
+    deploy_project_ids_by_account        = { "111111111111" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"] }
+    deploy_role_policy_arns              = ["arn:aws:iam::aws:policy/PowerUserAccess"]
+    deploy_role_permissions_boundary_arn = "arn:aws:iam::111111111111:policy/env0/boundary"
+    deploy_role_max_session_duration     = 7200
+  }
+  assert {
+    condition = (
+      aws_iam_role.deploy[0].permissions_boundary == "arn:aws:iam::111111111111:policy/env0/boundary" &&
+      aws_iam_role.deploy[0].max_session_duration == 7200 &&
+      keys(aws_iam_role_policy_attachment.deploy) == ["arn:aws:iam::aws:policy/PowerUserAccess"]
+    )
+    error_message = "the boundary, session and policies reach the role"
+  }
+}
+
+run "refuses_a_project_list_over_35_projects" {
+  command = plan
+  variables {
+    deploy_project_ids_by_account = {
+      "222222222222" = [for index in range(36) : format("0b5f7c2e-4d1a-4c3b-8e9f-%012d", index)]
+    }
+  }
+  expect_failures = [var.deploy_project_ids_by_account]
+}
+
+run "refuses_a_malformed_account_in_the_project_map" {
+  command = plan
+  variables {
+    deploy_project_ids_by_account = { "22" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"] }
+  }
+  expect_failures = [var.deploy_project_ids_by_account]
+}
+
+run "renders_the_stack_set_template_as_compact_json" {
+  command = plan
+  variables {
+    deploy_project_ids_by_account = { "222222222222" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"] }
+  }
+  assert {
+    condition = (
+      can(jsondecode(aws_cloudformation_stack_set.deploy_roles[0].template_body)) &&
+      !strcontains(aws_cloudformation_stack_set.deploy_roles[0].template_body, "\n")
+    )
+    error_message = "the body is one line of JSON"
+  }
+}
+
+run "reports_the_exact_size_of_the_template" {
+  command = plan
+  variables {
+    deploy_account_ids            = ["222222222222"]
+    deploy_project_ids_by_account = { "222222222222" = ["00000000-0000-0000-0000-000000000001"] }
+  }
+  assert {
+    condition     = output.deploy_roles_template_bytes == length(aws_cloudformation_stack_set.deploy_roles[0].template_body) && output.deploy_roles_template_bytes == 8677
+    error_message = "the output is the length of the body, 8,677 bytes for one account with one project"
+  }
+}
+
+run "keeps_a_departing_account_in_the_mappings" {
+  command = plan
+  variables {
+    deploy_account_ids = ["222222222222"]
+    deploy_project_ids_by_account = {
+      "222222222222" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"]
+      "333333333333" = []
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(aws_cloudformation_stack_set.deploy_roles[0].template_body).Mappings.AccountProjects) == jsonencode({
+      "222222222222" = { Ids = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"] }
+      "333333333333" = { Ids = ["none"] }
+    })
+    error_message = "an account still in the map but no longer picked keeps its entry, so the update before its instance is removed still resolves"
+  }
+}
+
+run "renders_no_mappings_for_assume_role" {
+  command = plan
+  variables {
+    deploy_sign_in_method         = "assume_role"
+    deploy_project_ids            = []
+    deploy_trusted_principal_arn  = "arn:aws:iam::913128560467:root"
+    deploy_project_ids_by_account = { "222222222222" = ["0b5f7c2e-4d1a-4c3b-8e9f-1a2b3c4d5e6f"] }
+  }
+  assert {
+    condition = (
+      !contains(keys(yamldecode(aws_cloudformation_stack_set.deploy_roles[0].template_body)), "Mappings") &&
+      !strcontains(aws_cloudformation_stack_set.deploy_roles[0].template_body, "FindInMap")
+    )
+    error_message = "assume role needs no project mapping"
+  }
+}
+
+run "updates_every_account_at_once_and_tolerates_failures" {
+  command = plan
+  assert {
+    condition = (
+      aws_cloudformation_stack_set.deploy_roles[0].operation_preferences[0].failure_tolerance_percentage == 100 &&
+      aws_cloudformation_stack_set.deploy_roles[0].operation_preferences[0].max_concurrent_percentage == 100 &&
+      aws_cloudformation_stack_set.deploy_roles[0].operation_preferences[0].region_concurrency_type == "PARALLEL"
+    )
+    error_message = "a StackSet update reaches the accounts in parallel, and a failed account does not fail the apply"
+  }
+}
+
+run "accepts_a_template_at_the_size_limit" {
+  command = plan
+  variables {
+    deploy_project_ids_by_account = {
+      for account in range(30) :
+      format("%012d", 100000000000 + account) => [for project in range(35) : format("00000000-0000-0000-0000-%012d", account * 100 + project + 1)]
+    }
+  }
+  assert {
+    condition     = output.deploy_roles_template_bytes <= 51200
+    error_message = "30 accounts with 35 projects each fit"
+  }
+}
+
+run "refuses_a_template_over_the_size_limit" {
+  command = plan
+  variables {
+    deploy_project_ids_by_account = {
+      for account in range(31) :
+      format("%012d", 100000000000 + account) => [for project in range(35) : format("00000000-0000-0000-0000-%012d", account * 100 + project + 1)]
+    }
+  }
+  expect_failures = [aws_cloudformation_stack_set.deploy_roles]
+}
+
+run "reports_the_deploy_stack_set_for_the_apply_check" {
+  command = plan
+  variables {
+    names = {
+      read_role        = "env-zero-cloud-compass-ab12cd"
+      read_stack_set   = "env-zero-cloud-compass-read-ab12cd"
+      cur_bucket       = "env-zero-cur-111111111111-ab12cd"
+      cur_export       = "env-zero-cur-ab12cd"
+      cur_policy       = "env-zero-cur-read"
+      deploy_role      = "env-zero-deploy-ab12cd"
+      deploy_stack_set = "env-zero-deploy-roles-ab12cd"
+    }
+  }
+  assert {
+    condition     = output.deploy_stack_set_name == "env-zero-deploy-roles-ab12cd" && output.deploy_stack_set_region == "us-east-1"
+    error_message = "the setup's apply check finds the StackSet and the region of its instances"
+  }
+}
+
+run "reports_no_deploy_stack_set_without_member_deploy_roles" {
+  command = plan
+  variables {
+    deploy_account_ids = []
+  }
+  assert {
+    condition     = output.deploy_stack_set_name == null && output.deploy_stack_set_region == null
+    error_message = "no StackSet, nothing to check"
+  }
 }

@@ -57,6 +57,12 @@ variable "include_cost_data" {
   default     = true
 }
 
+variable "read_role_name" {
+  description = "Organization: name of the Cloud Compass read role in the management account and in every member account. env zero gives each setup its own. The default is the name every setup shared before, so a setup from before this variable keeps its roles."
+  type        = string
+  default     = "env0-cloud-compass-read"
+}
+
 variable "read_roles_redeploy_token" {
   description = "Organization: change it to deploy the member accounts' read roles again, as env zero's Retry does when one's stack failed."
   type        = string
@@ -192,13 +198,13 @@ variable "deploy_project_ids" {
 }
 
 variable "deploy_trusted_principal_arn" {
-  description = "With assume_role: the IAM role of the organization's self-hosted env zero agent, which signs in with the organization ID as External ID."
+  description = "With assume_role: the IAM role of the organization's self-hosted env zero agent, or the root of env zero's AWS account, which signs in with the organization ID as External ID."
   type        = string
   default     = ""
 
   validation {
-    condition     = can(regex("^(arn:aws[a-z-]*:iam::\\d{12}:role/[\\w+=,.@/-]+)?$", var.deploy_trusted_principal_arn))
-    error_message = "deploy_trusted_principal_arn must be an IAM role ARN, or empty."
+    condition     = can(regex("^(arn:aws[a-z-]*:iam::\\d{12}:(root|role/[\\w+=,.@/-]+))?$", var.deploy_trusted_principal_arn))
+    error_message = "deploy_trusted_principal_arn must be an IAM role ARN or an account root ARN, or empty."
   }
 }
 
@@ -210,5 +216,83 @@ variable "env0_organization_id" {
   validation {
     condition     = can(regex("^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$", var.env0_organization_id))
     error_message = "env0_organization_id must be an env zero organization ID."
+  }
+}
+
+variable "names" {
+  description = "Names of the resources env zero gives each setup, kept per setup so a redeploy never renames. Null keeps the names of a setup from before this variable: read_role_name, deploy_role_name and name-derived names."
+  type = object({
+    read_role        = string
+    read_stack_set   = string
+    cur_bucket       = string
+    cur_export       = string
+    cur_policy       = string
+    deploy_role      = string
+    deploy_stack_set = string
+  })
+  default = null
+
+  validation {
+    condition = var.names == null ? true : (
+      can(regex("^[\\w+=,.@-]{1,64}$", var.names.read_role)) &&
+      can(regex("^[\\w+=,.@-]{1,64}$", var.names.deploy_role)) &&
+      can(regex("^[\\w+=,.@-]{1,128}$", var.names.cur_policy)) &&
+      can(regex("^[A-Za-z][A-Za-z0-9-]{0,127}$", var.names.read_stack_set)) &&
+      can(regex("^[A-Za-z][A-Za-z0-9-]{0,127}$", var.names.deploy_stack_set)) &&
+      can(regex("^[0-9A-Za-z_-]{1,128}$", var.names.cur_export)) &&
+      can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.names.cur_bucket))
+    )
+    error_message = "names must hold valid IAM role, policy, StackSet, CUR export and S3 bucket names."
+  }
+}
+
+variable "read_access" {
+  description = "Create the Cloud Compass read role, its StackSet and the CUR export. False leaves them out, for a setup that only creates deploy roles."
+  type        = bool
+  default     = true
+}
+
+variable "read_organization_unit_ids" {
+  description = "Organization: the organizational units (or the root ID) whose member accounts get the Cloud Compass read role, with new accounts in them getting it too. Null gives every member account under the root, as before. An empty list gives no member account. The management account always has its read role."
+  type        = list(string)
+  default     = null
+
+  validation {
+    condition = var.read_organization_unit_ids == null ? true : (
+      alltrue([for id in var.read_organization_unit_ids : can(regex("^(ou-[0-9a-z]{4,32}-[0-9a-z]{8,32}|r-[0-9a-z]{4,32})$", id))]) &&
+      length(distinct(var.read_organization_unit_ids)) == length(var.read_organization_unit_ids)
+    )
+    error_message = "read_organization_unit_ids must hold distinct organizational unit IDs, or the root ID."
+  }
+}
+
+variable "deploy_single_account" {
+  description = "One account: create the deploy role in this account."
+  type        = bool
+  default     = false
+}
+
+variable "deploy_management_account" {
+  description = "Organization: create the deploy role in the management account, with the trust of the member accounts' deploy roles."
+  type        = bool
+  default     = false
+}
+
+variable "deploy_project_ids_by_account" {
+  description = "With oidc: the env zero projects whose deployments may sign in to each account's deploy role, by account ID. An account missing here, or with an empty list, trusts no project. Null gives every account deploy_project_ids."
+  type        = map(list(string))
+  default     = null
+
+  validation {
+    condition = var.deploy_project_ids_by_account == null ? true : (
+      alltrue([for id in keys(var.deploy_project_ids_by_account) : can(regex("^\\d{12}$", id))]) &&
+      alltrue([
+        for ids in values(var.deploy_project_ids_by_account) :
+        length(ids) <= 35 &&
+        length(distinct(ids)) == length(ids) &&
+        alltrue([for id in ids : can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", id))])
+      ])
+    )
+    error_message = "deploy_project_ids_by_account must map 12-digit account IDs to up to 35 distinct env zero project IDs."
   }
 }
