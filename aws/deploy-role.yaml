@@ -3,6 +3,13 @@ Description: >-
   env zero, member account. Creates the role that env zero deploys with, trusted by env zero's OpenID Connect tokens of
   the picked projects, or by the organization's self-hosted agent role with the env zero organization ID as External ID.
 
+# RedeployToken is used by no resource on purpose: only a new value matters, which updates every member stack.
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001
+
 Parameters:
   RoleName:
     Type: String
@@ -62,6 +69,10 @@ Parameters:
     Type: String
     Description: The env zero organization ID, which the agent sends as External ID. Assume role only.
     AllowedPattern: '^[^"\\]*$'
+    Default: ''
+  RedeployToken:
+    Type: String
+    Description: Used by no resource. A new value updates the stack, so a stack instance that did not update is deployed again.
     Default: ''
 
 Rules:

@@ -19,6 +19,7 @@ resource "aws_cloudformation_stack_set" "deploy_roles" {
     AllowedProjectIds             = local.deploy_template_by_account ? "" : join(",", var.deploy_project_ids)
     TrustedPrincipalArn           = var.deploy_trusted_principal_arn
     Env0OrganizationId            = var.env0_organization_id
+    RedeployToken                 = var.deploy_roles_redeploy_token
   }
 
   # Only the picked accounts, so a new account in the Organization gets no deploy role.
@@ -102,7 +103,7 @@ resource "aws_cloudformation_stack_instances" "deploy_roles" {
 
 module "deploy_oidc_provider" {
   count  = local.deploy_in_this_account && local.deploy_oidc ? 1 : 0
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/db31401ac476/cloud-compass-opentofu.zip//cloud-compass-oidc-provider"
+  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/6ffd4753b268/cloud-compass-opentofu.zip//cloud-compass-oidc-provider"
 
   name     = "${var.name}-deploy"
   issuer   = var.env0_oidc_issuer

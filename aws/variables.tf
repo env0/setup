@@ -69,6 +69,12 @@ variable "read_roles_redeploy_token" {
   default     = ""
 }
 
+variable "deploy_roles_redeploy_token" {
+  description = "Organization: change it to update the deploy roles in every member account again, as env zero's Try again does when an account's deploy role did not update."
+  type        = string
+  default     = ""
+}
+
 variable "deploy_account_ids" {
   description = "Organization member accounts that get a deploy role. The management account deploys with the role env zero already has there."
   type        = list(string)

@@ -725,7 +725,7 @@ run "reports_the_exact_size_of_the_template" {
     deploy_project_ids_by_account = { "222222222222" = ["00000000-0000-0000-0000-000000000001"] }
   }
   assert {
-    condition     = output.deploy_roles_template_bytes == length(aws_cloudformation_stack_set.deploy_roles[0].template_body) && output.deploy_roles_template_bytes == 8677
+    condition     = output.deploy_roles_template_bytes == length(aws_cloudformation_stack_set.deploy_roles[0].template_body) && output.deploy_roles_template_bytes == 8914
     error_message = "the output is the length of the body, 8,677 bytes for one account with one project"
   }
 }
