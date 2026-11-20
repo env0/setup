@@ -91,7 +91,7 @@ data "aws_organizations_organization" "current" {
 
 module "oidc_provider" {
   for_each = local.oidc_keys
-  source   = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/db31401ac476/cloud-compass-opentofu.zip//cloud-compass-oidc-provider"
+  source   = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/6ffd4753b268/cloud-compass-opentofu.zip//cloud-compass-oidc-provider"
 
   name     = var.name
   issuer   = var.context_layer_oidc_issuer
