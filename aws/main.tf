@@ -1,140 +1,319 @@
 locals {
   organization = var.account_mode == "organization"
-  # One account deploys with the role its deployment credential already uses.
-  deploy_roles = local.organization && length(var.deploy_account_ids) > 0
+  account_id   = data.aws_caller_identity.current.account_id
+  partition    = data.aws_partition.current.partition
   # IAM is global; the region is only where each member account's stack runs, so an SCP must allow it.
-  region = var.deploy_roles_region
+  region      = var.deploy_roles_region
+  read_region = "us-east-1"
+  key         = var.account_mode
+
+  read_keys   = var.read_access ? toset([var.account_mode]) : toset([])
+  cur_keys    = var.include_cost_data ? local.read_keys : toset([])
+  oidc        = var.context_layer_sign_in_method == "oidc"
+  oidc_keys   = local.oidc ? local.read_keys : toset([])
+  member_keys = local.oidc && local.organization ? local.read_keys : toset([])
+
+  read_role_name        = var.names != null ? var.names.read_role : (local.organization ? var.read_role_name : null)
+  read_stack_set_name   = var.names != null ? var.names.read_stack_set : var.name
+  cur_bucket_name       = var.names != null ? var.names.cur_bucket : null
+  cur_export_name       = var.names != null ? var.names.cur_export : "cq-cur-${var.name}"
+  cur_policy_name       = var.names != null ? var.names.cur_policy : "cur-read"
+  deploy_role_name      = var.names != null ? var.names.deploy_role : var.deploy_role_name
+  deploy_stack_set_name = var.names != null ? var.names.deploy_stack_set : "${var.name}-deploy-roles"
+
+  deploy_roles = local.organization && length(var.deploy_account_ids) > 0
+  deploy_oidc  = var.deploy_sign_in_method == "oidc"
   deploy_role_policy_arns = (
     var.deploy_role_policy_arns != null
     ? var.deploy_role_policy_arns
-    : ["arn:${data.aws_partition.current.partition}:iam::aws:policy/AdministratorAccess"]
+    : ["arn:${local.partition}:iam::aws:policy/AdministratorAccess"]
   )
+  deploy_permissions_boundary = try(split(":policy/", var.deploy_role_permissions_boundary_arn)[1], "")
+  deploy_in_this_account = (
+    local.organization ? var.deploy_management_account : var.deploy_single_account
+  )
+  deploy_project_ids_here = (
+    var.deploy_project_ids_by_account == null
+    ? var.deploy_project_ids
+    : lookup(var.deploy_project_ids_by_account, local.account_id, [])
+  )
+  no_project_id = "none"
+  deploy_template_by_account = (
+    var.deploy_project_ids_by_account != null || can(regex(":root$", var.deploy_trusted_principal_arn))
+  )
+  deploy_template_source = file("${path.module}/deploy-role.yaml")
+  deploy_template_mapped = local.deploy_template_by_account && local.deploy_oidc
+  deploy_mapping_accounts = toset(concat(
+    var.deploy_account_ids,
+    keys(var.deploy_project_ids_by_account == null ? {} : var.deploy_project_ids_by_account)
+  ))
+  deploy_account_mappings = {
+    for id in local.deploy_mapping_accounts : id => {
+      Ids = (
+        length(var.deploy_project_ids_by_account == null ? var.deploy_project_ids : lookup(var.deploy_project_ids_by_account, id, [])) > 0
+        ? (var.deploy_project_ids_by_account == null ? var.deploy_project_ids : lookup(var.deploy_project_ids_by_account, id, []))
+        : [local.no_project_id]
+      )
+    }
+  }
+  deploy_template_text = replace(
+    replace(
+      replace(local.deploy_template_source, local.trusted_principal_pattern, local.trusted_principal_pattern_with_root),
+      local.project_ids_assertion,
+      ""
+    ),
+    local.project_ids_join,
+    local.deploy_template_mapped ? local.project_ids_from_mapping : local.project_ids_join
+  )
+  deploy_template = (
+    local.deploy_template_by_account
+    ? jsonencode(merge(yamldecode(local.deploy_template_text), local.deploy_template_mapped ? { Mappings = { AccountProjects = local.deploy_account_mappings } } : {}))
+    : local.deploy_template_source
+  )
+  deploy_template_limit = 51200
+  deploy_template_bytes = length(local.deploy_template)
+  deploy_project_counts = concat([0], [for ids in values(var.deploy_project_ids_by_account == null ? {} : var.deploy_project_ids_by_account) : length(ids)])
+
+  trusted_principal_pattern           = "AllowedPattern: '^(arn:aws[a-z-]*:iam::\\d{12}:role/[\\w+=,.@/-]+)?$'"
+  trusted_principal_pattern_with_root = "AllowedPattern: '^(arn:aws[a-z-]*:iam::\\d{12}:(root|role/[\\w+=,.@/-]+))?$'"
+  project_ids_assertion               = "      - Assert: {'Fn::Not': [{'Fn::EachMemberEquals': [{Ref: AllowedProjectIds}, '']}]}\n        AssertDescription: OIDC needs AllowedProjectIds.\n"
+  project_ids_join                    = "ProjectIds: {'Fn::Join': ['\",\"', {Ref: AllowedProjectIds}]}"
+  project_ids_from_mapping            = "ProjectIds: {'Fn::Join': ['\",\"', {'Fn::FindInMap': [AccountProjects, {Ref: 'AWS::AccountId'}, Ids]}]}"
 }
 
 data "aws_partition" "current" {}
 
-# No callback: env zero reads the outputs when the deployment completes.
-module "single" {
-  count  = local.organization ? 0 : 1
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/a5249a2c9df0/cloud-compass-opentofu.zip//cloud-compass-single"
-
-  sign_in_method      = var.context_layer_sign_in_method
-  cloudquery_role_arn = var.context_layer_role_arn
-  external_id         = var.external_id
-  oidc_issuer         = var.context_layer_oidc_issuer
-  oidc_audience       = var.context_layer_oidc_audience
-  oidc_subject        = var.context_layer_oidc_subject
-  name                = var.name
-  include_cost_data   = var.include_cost_data
-}
-
-module "organization" {
-  count  = local.organization ? 1 : 0
-  source = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/a5249a2c9df0/cloud-compass-opentofu.zip//cloud-compass-org"
-
-  sign_in_method         = var.context_layer_sign_in_method
-  cloudquery_role_arn    = var.context_layer_role_arn
-  external_id            = var.external_id
-  oidc_issuer            = var.context_layer_oidc_issuer
-  oidc_audience          = var.context_layer_oidc_audience
-  oidc_subject           = var.context_layer_oidc_subject
-  name                   = var.name
-  include_cost_data      = var.include_cost_data
-  members_redeploy_token = var.read_roles_redeploy_token
-}
+data "aws_caller_identity" "current" {}
 
 data "aws_organizations_organization" "current" {
-  count = local.deploy_roles ? 1 : 0
+  count = local.organization ? 1 : 0
 }
 
-resource "aws_cloudformation_stack_set" "deploy_roles" {
-  count            = local.deploy_roles ? 1 : 0
-  name             = "${var.name}-deploy-roles"
-  description      = "env zero deploy role in each member account env zero deploys to."
-  permission_model = "SERVICE_MANAGED"
-  call_as          = "SELF"
-  capabilities     = ["CAPABILITY_NAMED_IAM"]
-  template_body    = file("${path.module}/deploy-role.yaml")
+module "oidc_provider" {
+  for_each = local.oidc_keys
+  source   = "https://env0-cloud-compass-templates-prod.s3.amazonaws.com/db31401ac476/cloud-compass-opentofu.zip//cloud-compass-oidc-provider"
 
-  parameters = {
-    RoleName                      = var.deploy_role_name
-    ManagedPolicyArns             = join(",", local.deploy_role_policy_arns)
-    PermissionsBoundaryPolicyName = try(split(":policy/", var.deploy_role_permissions_boundary_arn)[1], "")
-    MaxSessionDuration            = var.deploy_role_max_session_duration
-    SignInMethod                  = var.deploy_sign_in_method
-    OidcIssuer                    = var.env0_oidc_issuer
-    OidcAudience                  = "sts.amazonaws.com"
-    OidcSubject                   = var.env0_oidc_subject
-    AllowedProjectIds             = join(",", var.deploy_project_ids)
-    TrustedPrincipalArn           = var.deploy_trusted_principal_arn
-    Env0OrganizationId            = var.env0_organization_id
-  }
+  name     = var.name
+  issuer   = var.context_layer_oidc_issuer
+  audience = var.context_layer_oidc_audience
+}
 
-  # Only the picked accounts, so a new account in the Organization gets no deploy role.
-  auto_deployment {
-    enabled = false
-  }
-
-  managed_execution {
-    active = true
-  }
-
-  # A template or parameter update reaches the accounts one at a time: this resource has no soft failure tolerance.
-  timeouts {
-    update = "2h"
-  }
+data "aws_iam_policy_document" "trust" {
+  for_each = local.oidc ? toset([]) : local.read_keys
 
   lifecycle {
     precondition {
-      condition = (
-        var.deploy_sign_in_method == "oidc"
-        ? var.env0_oidc_subject != "" && length(var.deploy_project_ids) > 0
-        : var.env0_organization_id != "" && var.deploy_trusted_principal_arn != ""
-      )
-      error_message = "Deploy roles need env0_oidc_subject and deploy_project_ids with oidc, or env0_organization_id and deploy_trusted_principal_arn with assume_role."
+      condition     = var.context_layer_role_arn != null && var.external_id != null
+      error_message = "assume_role needs context_layer_role_arn and external_id."
+    }
+  }
+
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [var.context_layer_role_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "sts:ExternalId"
+      values   = [var.external_id]
     }
   }
 }
 
-# One resource for every picked account: a StackSet runs one operation at a time, and the provider's create does not
-# wait out another one, so instances per account would collide. A change of the list updates it in place: the
-# provider deletes only the removed accounts and creates with the whole list, both with INTERSECTION, so nothing
-# reaches an account outside the list. A stack set instance would instead replace every account's stack.
-resource "aws_cloudformation_stack_instances" "deploy_roles" {
-  count          = local.deploy_roles ? 1 : 0
-  stack_set_name = aws_cloudformation_stack_set.deploy_roles[0].name
-  call_as        = "SELF"
-  regions        = [local.region]
+# A role may assume itself only when its trust policy says so.
+data "aws_iam_policy_document" "self_assume" {
+  for_each = local.member_keys
 
-  deployment_targets {
-    organizational_unit_ids = [data.aws_organizations_organization.current[0].roots[0].id]
-    accounts                = var.deploy_account_ids
-    account_filter_type     = "INTERSECTION"
-  }
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
 
-  # Under the default strict mode the concurrency is the failure tolerance plus one, so every account at once needs soft.
-  operation_preferences {
-    concurrency_mode             = "SOFT_FAILURE_TOLERANCE"
-    failure_tolerance_percentage = 0
-    max_concurrent_percentage    = 100
-    region_concurrency_type      = "PARALLEL"
-  }
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${local.partition}:iam::${local.account_id}:root"]
+    }
 
-  timeouts {
-    create = "2h"
-    update = "2h"
-    delete = "2h"
-  }
-
-  # INTERSECTION drops an account outside the Organization, and a service-managed StackSet never deploys to the
-  # management account, so either would get no role while deploy_role_arns still lists one.
-  lifecycle {
-    precondition {
-      condition = length(setsubtract(
-        var.deploy_account_ids,
-        data.aws_organizations_organization.current[0].non_master_accounts[*].id
-      )) == 0
-      error_message = "deploy_account_ids must be member accounts of the Organization, not its management account."
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:${local.partition}:iam::${local.account_id}:role/${local.read_role_name}"]
     }
   }
+
+  lifecycle {
+    precondition {
+      condition     = local.read_role_name != null
+      error_message = "An Organization's read role needs a name, the one the member roles share."
+    }
+  }
+}
+
+# The provider's ARN comes from the module, so IAM never sees a trust in a provider not made yet.
+data "aws_iam_policy_document" "oidc_trust" {
+  for_each                = local.oidc_keys
+  source_policy_documents = local.organization ? [data.aws_iam_policy_document.self_assume[local.key].json] : []
+
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [module.oidc_provider[local.key].provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${var.context_layer_oidc_issuer}:aud"
+      values   = [var.context_layer_oidc_audience]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${var.context_layer_oidc_issuer}:sub"
+      values   = [var.context_layer_oidc_subject]
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.context_layer_oidc_issuer != null && var.context_layer_oidc_audience != null && var.context_layer_oidc_subject != null
+      error_message = "oidc needs context_layer_oidc_issuer, context_layer_oidc_audience and context_layer_oidc_subject."
+    }
+  }
+}
+
+resource "aws_iam_role" "read" {
+  for_each           = local.read_keys
+  name               = local.read_role_name
+  name_prefix        = local.read_role_name == null ? "${var.name}-read-" : null
+  assume_role_policy = local.oidc ? data.aws_iam_policy_document.oidc_trust[each.key].json : data.aws_iam_policy_document.trust[each.key].json
+}
+
+resource "aws_iam_role_policy_attachment" "read_only" {
+  for_each   = local.read_keys
+  role       = aws_iam_role.read[each.key].name
+  policy_arn = "arn:${local.partition}:iam::aws:policy/ReadOnlyAccess"
+}
+
+data "aws_iam_policy_document" "cur_read" {
+  for_each = local.cur_keys
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      aws_s3_bucket.cur[each.key].arn,
+      "${aws_s3_bucket.cur[each.key].arn}/*",
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "bcm-data-exports:GetExport",
+      "bcm-data-exports:ListExports",
+      "bcm-data-exports:GetTable",
+      "bcm-data-exports:ListTables",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "cur_read" {
+  for_each = local.cur_keys
+  name     = local.cur_policy_name
+  role     = aws_iam_role.read[each.key].id
+  policy   = data.aws_iam_policy_document.cur_read[each.key].json
+}
+
+# CloudQuery's assetInventoryAdditionalReadActions (cdk-onboarding/lib/common/iam.ts), which ReadOnlyAccess lacks.
+data "aws_iam_policy_document" "additional_read" {
+  for_each = local.read_keys
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "quicksight:ListGroups",
+      "quicksight:ListUsers",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "additional_read" {
+  for_each = local.read_keys
+  name     = "additional-read"
+  role     = aws_iam_role.read[each.key].id
+  policy   = data.aws_iam_policy_document.additional_read[each.key].json
+}
+
+# CloudQuery's Deny list (cdk-onboarding/lib/common/iam.ts), with the CUR bucket kept readable as in its unified stack.
+data "aws_iam_policy_document" "default_deny" {
+  for_each = local.read_keys
+
+  statement {
+    effect = "Deny"
+    actions = [
+      "cloudformation:GetTemplate",
+      "dynamodb:GetItem",
+      "dynamodb:BatchGetItem",
+      "dynamodb:Query",
+      "dynamodb:Scan",
+      "ec2:GetConsoleOutput",
+      "ec2:GetConsoleScreenshot",
+      "ecr:BatchGetImage",
+      "ecr:GetAuthorizationToken",
+      "ecr:GetDownloadUrlForLayer",
+      "kinesis:Get*",
+      "lambda:GetFunction",
+      "logs:GetLogEvents",
+      "sdb:Select*",
+      "sqs:ReceiveMessage",
+      "secretsmanager:GetSecretValue",
+      "ssm:GetCommandInvocation",
+      "ssm:GetParameter*",
+    ]
+    resources = ["*"]
+  }
+
+  # Without cost data the role reads no S3 object at all.
+  statement {
+    effect        = "Deny"
+    actions       = ["s3:GetObject"]
+    resources     = var.include_cost_data ? null : ["*"]
+    not_resources = var.include_cost_data ? ["${aws_s3_bucket.cur[each.key].arn}/*"] : null
+  }
+}
+
+resource "aws_iam_role_policy" "default_deny" {
+  for_each = local.read_keys
+  name     = "default-deny"
+  role     = aws_iam_role.read[each.key].id
+  policy   = data.aws_iam_policy_document.default_deny[each.key].json
+}
+
+data "aws_iam_policy_document" "assume_member_roles" {
+  for_each = local.member_keys
+
+  statement {
+    effect    = "Allow"
+    actions   = ["sts:AssumeRole"]
+    resources = ["arn:${local.partition}:iam::*:role/${local.read_role_name}"]
+  }
+}
+
+resource "aws_iam_role_policy" "assume_member_roles" {
+  for_each = local.member_keys
+  name     = "assume-member-roles"
+  role     = aws_iam_role.read[each.key].id
+  policy   = data.aws_iam_policy_document.assume_member_roles[each.key].json
 }
